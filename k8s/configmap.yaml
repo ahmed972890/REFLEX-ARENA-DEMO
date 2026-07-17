@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reflex-config
+data:
+  # Values must match the Terraform defaults (project_name=reflex, region eu-west-3).
+  ENVIRONMENT: production
+  AWS_REGION: eu-west-3
+  DYNAMODB_TABLE: reflex-scores
+  AUTO_CREATE_TABLE: "false"
+  LOG_LEVEL: INFO

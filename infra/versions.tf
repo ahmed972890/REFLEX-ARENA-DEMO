@@ -1,0 +1,78 @@
+terraform {
+  required_version = ">= 1.9"
+
+  # Remote state: S3 bucket + DynamoDB lock table, both created by
+  # scripts/bootstrap-state.sh which also generates infra/backend.hcl
+  # (gitignored — it contains the account-specific bucket name).
+  # Init with: terraform init -backend-config=backend.hcl  (or `make tf-init`)
+  backend "s3" {}
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.80"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.35"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.16"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.region
+
+  default_tags {
+    tags = {
+      Project   = var.project_name
+      ManagedBy = "terraform"
+    }
+  }
+}
+
+# Used only to create the namespace + IRSA ServiceAccounts (identity concerns);
+# workloads are applied by CI with kustomize.
+provider "kubernetes" {
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.region]
+  }
+}
+
+# Installs the External Secrets Operator chart.
+provider "helm" {
+  kubernetes {
+    host = module.eks.cluster_endpoint
+
+    cluster_ca_certificate = base64decode(
+      module.eks.cluster_certificate_authority_data
+    )
+
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+
+      args = [
+        "eks",
+        "get-token",
+        "--cluster-name",
+        module.eks.cluster_name,
+        "--region",
+        var.region
+      ]
+    }
+  }
+}
+

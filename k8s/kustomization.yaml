@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The namespace and the IRSA-annotated ServiceAccount are created by Terraform
+# (they are identity/infra concerns); everything workload-shaped lives here.
+namespace: reflex
+
+resources:
+  - configmap.yaml
+  - secretstore.yaml
+  - externalsecret.yaml
+  - networkpolicy.yaml
+  - backend.yaml
+  - frontend.yaml
+  - hpa.yaml
+  - pdb.yaml
+
+# CI pins these to the ECR registry + git SHA on every deploy:
+#   kustomize edit set image reflex-backend=<ecr>/reflex-backend:<sha> ...
+images:
+  - name: reflex-backend
+    newTag: local
+  - name: reflex-frontend
+    newTag: local

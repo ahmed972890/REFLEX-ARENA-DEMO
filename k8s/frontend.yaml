@@ -1,0 +1,106 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reflex-frontend
+  labels:
+    app: reflex-frontend
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: reflex-frontend
+  template:
+    metadata:
+      labels:
+        app: reflex-frontend
+    spec:
+      terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: reflex-frontend
+      containers:
+        - name: frontend
+          image: reflex-frontend
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: BACKEND_URL
+              value: http://reflex-backend:8000
+            - name: INTERNAL_TOKEN # injected into the /api proxy header by nginx
+              valueFrom:
+                secretKeyRef:
+                  name: reflex-internal
+                  key: INTERNAL_API_TOKEN
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            # nginx-unprivileged writes its pid/cache under /tmp; envsubst renders
+            # the config template into /etc/nginx/conf.d at startup.
+            - name: tmp
+              mountPath: /tmp
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: nginx-conf
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reflex-frontend
+  labels:
+    app: reflex-frontend
+  annotations:
+    # In-tree controller provisions an internet-facing NLB (no extra controllers needed).
+    # Production upgrade path: AWS Load Balancer Controller + ALB Ingress + ACM TLS.
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+spec:
+  type: LoadBalancer
+  selector:
+    app: reflex-frontend
+  ports:
+    - port: 80
+      targetPort: http
+      name: http

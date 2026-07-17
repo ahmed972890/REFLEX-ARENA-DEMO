@@ -1,0 +1,19 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: reflex-backend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: reflex-backend
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: reflex-frontend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: reflex-frontend
