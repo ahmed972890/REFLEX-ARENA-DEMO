@@ -1,0 +1,158 @@
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-3' }}
+  EKS_CLUSTER: ${{ vars.EKS_CLUSTER_NAME || 'reflex-eks' }}
+
+jobs:
+  backend-checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Test
+        run: pytest
+
+  frontend-checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Build
+        run: npm run build
+
+  build-images:
+    runs-on: ubuntu-latest
+    needs: [backend-checks, frontend-checks]
+    permissions:
+      contents: read
+      id-token: write # OIDC federation to AWS — no stored cloud credentials
+    strategy:
+      matrix:
+        service: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Authenticate to AWS (OIDC)
+        if: github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        if: github.ref == 'refs/heads/main'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build (PR validation only)
+        if: github.ref != 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          push: false
+          tags: reflex-${{ matrix.service }}:ci
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Build and push (main)
+        if: github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          push: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/reflex-${{ matrix.service }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/reflex-${{ matrix.service }}:latest
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: build-images
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: production
+      url: ${{ steps.url.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Point kubectl at the cluster
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
+
+      - uses: imranismail/setup-kustomize@v2
+
+      - name: Pin images to this commit
+        working-directory: k8s
+        run: |
+          REGISTRY="$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${AWS_REGION}.amazonaws.com"
+          kustomize edit set image \
+            "reflex-backend=${REGISTRY}/reflex-backend:${GITHUB_SHA}" \
+            "reflex-frontend=${REGISTRY}/reflex-frontend:${GITHUB_SHA}"
+
+      - name: Deploy (rolling update)
+        run: |
+          kubectl apply -k k8s/
+          kubectl -n reflex rollout status deploy/reflex-backend --timeout=300s
+          kubectl -n reflex rollout status deploy/reflex-frontend --timeout=300s
+
+      - name: Resolve public URL
+        id: url
+        run: |
+          for i in $(seq 1 30); do
+            HOST=$(kubectl -n reflex get svc reflex-frontend \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            [ -n "$HOST" ] && break
+            sleep 10
+          done
+          [ -n "$HOST" ] || { echo "LoadBalancer hostname never appeared"; exit 1; }
+          echo "url=http://$HOST" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test
+        run: |
+          URL="${{ steps.url.outputs.url }}"
+          # First NLB provisioning can take a couple of minutes — retry patiently.
+          curl -fsS --retry 30 --retry-delay 10 --retry-all-errors "$URL/healthz"
+          curl -fsS --retry 10 --retry-delay 5 --retry-all-errors "$URL/api/leaderboard?limit=1"
+          echo "### ✅ Deployed and smoke-tested: $URL" >> "$GITHUB_STEP_SUMMARY"
