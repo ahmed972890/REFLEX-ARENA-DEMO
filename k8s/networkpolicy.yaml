@@ -1,0 +1,22 @@
+# Network-level isolation: only frontend pods may open connections to the
+# backend. Enforced by the VPC CNI network-policy agent (enabled in eks.tf).
+# Kubelet health probes are exempt by the agent. Egress is left open
+# (DynamoDB, DNS).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-from-frontend-only
+spec:
+  podSelector:
+    matchLabels:
+      app: reflex-backend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: reflex-frontend
+      ports:
+        - protocol: TCP
+          port: 8000

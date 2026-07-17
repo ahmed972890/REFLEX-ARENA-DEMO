@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reflex-backend
+  labels:
+    app: reflex-backend
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0 # zero-downtime deploys: new pods must be Ready first
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: reflex-backend
+  template:
+    metadata:
+      labels:
+        app: reflex-backend
+    spec:
+      serviceAccountName: reflex-backend # IRSA: pod gets DynamoDB access via IAM, no keys
+      terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity: # spread replicas across nodes when possible
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: reflex-backend
+      containers:
+        - name: backend
+          image: reflex-backend
+          ports:
+            - containerPort: 8000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: reflex-config
+          env:
+            - name: INTERNAL_API_TOKEN # synced from AWS Secrets Manager by ESO
+              valueFrom:
+                secretKeyRef:
+                  name: reflex-internal
+                  key: INTERNAL_API_TOKEN
+          resources:
+            requests:
+              cpu: 100m # HPA targets 60% of this
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          lifecycle:
+            preStop:
+              exec: # let the LB drain in-flight requests before SIGTERM
+                command: ["sleep", "5"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reflex-backend
+  labels:
+    app: reflex-backend
+spec:
+  type: ClusterIP # internal only — reached through the frontend's /api proxy
+  selector:
+    app: reflex-backend
+  ports:
+    - port: 8000
+      targetPort: http
+      name: http
