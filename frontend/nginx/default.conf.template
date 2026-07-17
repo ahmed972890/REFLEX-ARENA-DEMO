@@ -1,0 +1,50 @@
+# Rendered by the nginx image entrypoint (envsubst on ${BACKEND_URL}).
+# nginx runtime variables like $host are untouched.
+server {
+    listen 8080;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'" always;
+
+    # Load-balancer / probe target — cheap and dependency-free.
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # Single entry point for the SPA: same-origin API calls, no CORS needed.
+    # The backend keeps /metrics and /docs internal — only /api/* is exposed.
+    location /api/ {
+        proxy_pass ${BACKEND_URL};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Request-ID $request_id;
+        # Shared service token (from AWS Secrets Manager via External Secrets):
+        # the backend rejects /api requests that don't carry it.
+        proxy_set_header X-Internal-Token "${INTERNAL_TOKEN}";
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 10s;
+    }
+
+    # Hashed build assets are immutable — cache aggressively.
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    location / {
+        try_files $uri /index.html;
+    }
+}
