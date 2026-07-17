@@ -40,7 +40,7 @@ variable "node_max_size" {
 variable "github_repository" {
   description = "GitHub repo (owner/name) allowed to deploy via OIDC from its main branch"
   type        = string
-  default     = "ahmed972890/reflex-arena"
+  default     = "ahmed972890/REFLEX-ARENA-DEMO"
 }
 
 variable "create_github_oidc_provider" {
