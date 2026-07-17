@@ -1,0 +1,54 @@
+services:
+  dynamodb:
+    image: amazon/dynamodb-local:2.4.0
+    command: "-jar DynamoDBLocal.jar -sharedDb -inMemory"
+    ports:
+      - "8001:8000" # exposed for debugging (aws dynamodb ... --endpoint-url http://localhost:8001)
+
+  backend:
+    build: ./backend
+    environment:
+      ENVIRONMENT: local
+      DYNAMODB_ENDPOINT: http://dynamodb:8000
+      DYNAMODB_TABLE: reflex-scores
+      AWS_REGION: eu-west-3
+      # DynamoDB Local accepts any credentials — these are placeholders, not secrets.
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      AUTO_CREATE_TABLE: "true"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Dev-only value; in the cloud this comes from AWS Secrets Manager.
+      INTERNAL_API_TOKEN: local-dev-token
+    ports:
+      - "8000:8000"
+    depends_on:
+      - dynamodb
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  frontend:
+    build: ./frontend
+    environment:
+      BACKEND_URL: http://backend:8000
+      INTERNAL_TOKEN: local-dev-token
+    ports:
+      - "${FRONTEND_PORT:-3000}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # Run with: docker compose --profile loadtest run --rm k6
+  k6:
+    image: grafana/k6:0.57.0
+    profiles: ["loadtest"]
+    volumes:
+      - ./loadtest:/scripts:ro
+    environment:
+      BASE_URL: http://frontend:8080
+    command: run /scripts/k6-load.js
+    depends_on:
+      - frontend
